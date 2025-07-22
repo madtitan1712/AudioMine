@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt6.QtGui import QPixmap, QPalette, QColor, QLinearGradient, QBrush, QPainter, QFont
-
+from PyQt6.QtWidgets import QSizePolicy
 
 class ColorExtractor:
     """Extract dominant colors from album art for gradient background"""
@@ -101,6 +101,9 @@ class LyricsProvider:
 
     def get_lyrics(self, artist, title, album=None):
         """Get lyrics for a song from cache, file or API"""
+        if not artist or not title:
+            return "No lyrics found for this song."
+
         # Clean up inputs
         artist = self._clean_string(artist)
         title = self._clean_string(title)
@@ -118,7 +121,7 @@ class LyricsProvider:
             self.lyrics_cache[cache_key] = lyrics
             return lyrics
 
-        # Try Musixmatch API
+        # Try Musixmatch API with proper error handling
         try:
             lyrics = self._get_lyrics_from_api(artist, title)
             if lyrics:
@@ -182,91 +185,115 @@ class LyricsProvider:
             print(f"Error saving lyrics: {e}")
 
     def _get_lyrics_from_api(self, artist, title):
-        """Fetch lyrics from Musixmatch API"""
-        # First, search for the track
-        search_params = {
-            'q_artist': artist,
-            'q_track': title,
-            'page_size': 1,
-            'page': 1,
-            'apikey': self.api_key
-        }
+        """Fetch lyrics from Musixmatch API with improved error handling"""
+        try:
+            # First try with the matcher.lyrics.get endpoint which is more reliable
+            search_params = {
+                'q_artist': artist,
+                'q_track': title,
+                'apikey': self.api_key
+            }
 
-        search_url = f"{self.base_url}matcher.lyrics.get"
-        response = requests.get(search_url, params=search_params)
+            search_url = f"{self.base_url}matcher.lyrics.get"
+            response = self._safe_api_request(search_url, search_params)
 
-        if response.status_code == 200:
-            data = response.json()
+            if response and 'message' in response:
+                message = response['message']
+                if (message['header']['status_code'] == 200 and
+                        'body' in message and
+                        'lyrics' in message['body']):
+                    lyrics_body = message['body']['lyrics']['lyrics_body']
+                    return self._clean_lyrics(lyrics_body)
 
-            # Check if we got a match
-            if (data['message']['header']['status_code'] == 200 and
-                    'lyrics' in data['message']['body']):
+            # Fall back to track.search if matcher didn't work
+            return self._lyrics_by_track_search(artist, title)
 
-                lyrics_body = data['message']['body']['lyrics']['lyrics_body']
+        except Exception as e:
+            print(f"Error in API request: {e}")
+            return None
 
-                # Musixmatch free API adds a disclaimer at the end, remove it
-                if "..." in lyrics_body:
-                    lyrics_body = lyrics_body.split("...")[0]
+    def _lyrics_by_track_search(self, artist, title):
+        """Second approach: search for track then get lyrics"""
+        try:
+            search_params = {
+                'q_artist': artist,
+                'q_track': title,
+                'page_size': 1,
+                'page': 1,
+                's_track_rating': 'desc',
+                'apikey': self.api_key
+            }
 
-                # Remove commercial usage disclaimer
-                disclaimer = "This Lyrics is NOT for Commercial use"
-                if disclaimer in lyrics_body:
-                    lyrics_body = lyrics_body.replace(disclaimer, "").strip()
+            search_url = f"{self.base_url}track.search"
+            response = self._safe_api_request(search_url, search_params)
 
-                return lyrics_body
+            if not response or 'message' not in response:
+                return None
 
-        # Try another endpoint if the first one failed
-        search_params = {
-            'q_artist': artist,
-            'q_track': title,
-            'page_size': 1,
-            'page': 1,
-            's_track_rating': 'desc',
-            'apikey': self.api_key
-        }
+            message = response['message']
+            if (message['header']['status_code'] != 200 or
+                    'body' not in message or
+                    'track_list' not in message['body'] or
+                    len(message['body']['track_list']) == 0):
+                return None
 
-        search_url = f"{self.base_url}track.search"
-        response = requests.get(search_url, params=search_params)
+            track_id = message['body']['track_list'][0]['track']['track_id']
 
-        if response.status_code == 200:
-            data = response.json()
+            # Get lyrics for the found track
+            lyrics_params = {
+                'track_id': track_id,
+                'apikey': self.api_key
+            }
 
-            # Check if we found tracks
-            if (data['message']['header']['status_code'] == 200 and
-                    'track_list' in data['message']['body'] and
-                    len(data['message']['body']['track_list']) > 0):
+            lyrics_url = f"{self.base_url}track.lyrics.get"
+            lyrics_response = self._safe_api_request(lyrics_url, lyrics_params)
 
-                track_id = data['message']['body']['track_list'][0]['track']['track_id']
+            if not lyrics_response or 'message' not in lyrics_response:
+                return None
 
-                # Get lyrics for the found track
-                lyrics_params = {
-                    'track_id': track_id,
-                    'apikey': self.api_key
-                }
+            lyrics_message = lyrics_response['message']
+            if (lyrics_message['header']['status_code'] != 200 or
+                    'body' not in lyrics_message or
+                    'lyrics' not in lyrics_message['body']):
+                return None
 
-                lyrics_url = f"{self.base_url}track.lyrics.get"
-                lyrics_response = requests.get(lyrics_url, params=lyrics_params)
+            lyrics_body = lyrics_message['body']['lyrics']['lyrics_body']
+            return self._clean_lyrics(lyrics_body)
 
-                if lyrics_response.status_code == 200:
-                    lyrics_data = lyrics_response.json()
+        except Exception as e:
+            print(f"Error in track search: {e}")
+            return None
 
-                    if (lyrics_data['message']['header']['status_code'] == 200 and
-                            'lyrics' in lyrics_data['message']['body']):
-
-                        lyrics_body = lyrics_data['message']['body']['lyrics']['lyrics_body']
-
-                        # Clean up lyrics
-                        if "..." in lyrics_body:
-                            lyrics_body = lyrics_body.split("...")[0]
-
-                        # Remove commercial usage disclaimer
-                        disclaimer = "This Lyrics is NOT for Commercial use"
-                        if disclaimer in lyrics_body:
-                            lyrics_body = lyrics_body.replace(disclaimer, "").strip()
-
-                        return lyrics_body
+    def _safe_api_request(self, url, params):
+        """Make API request with proper error handling and timeouts"""
+        try:
+            response = requests.get(url, params=params, timeout=5)
+            if response.status_code == 200:
+                return response.json()
+        except requests.RequestException as e:
+            print(f"Request error: {e}")
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {e}")
+        except Exception as e:
+            print(f"Unexpected error in API request: {e}")
 
         return None
+
+    def _clean_lyrics(self, lyrics_body):
+        """Clean up lyrics from Musixmatch API"""
+        if not lyrics_body:
+            return None
+
+        # Remove the "..." at the end
+        if "..." in lyrics_body:
+            lyrics_body = lyrics_body.split("...")[0]
+
+        # Remove commercial usage disclaimer
+        disclaimer = "This Lyrics is NOT for Commercial use"
+        if disclaimer in lyrics_body:
+            lyrics_body = lyrics_body.replace(disclaimer, "").strip()
+
+        return lyrics_body
 
 
 class FullscreenPlayer(QWidget):
@@ -285,13 +312,15 @@ class FullscreenPlayer(QWidget):
         self.current_album_art = None
         self.background_colors = [QColor("#191414"), QColor("#121212")]
 
+        # Add checks for VLC player availability
+        self.vlc_available = hasattr(player, 'vlc_available') and player.vlc_available
+
         self.init_ui()
         self.setup_connections()
 
         # Set window properties
         self.setWindowTitle("AudioMine - Now Playing")
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
-        self.showFullScreen()
 
     def init_ui(self):
         """Initialize the UI components"""
@@ -349,8 +378,8 @@ class FullscreenPlayer(QWidget):
         # Spacer
         spacer1 = QWidget()
         spacer1.setSizePolicy(
-            QWidget.SizePolicy.Policy.Expanding,
-            QWidget.SizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
         )
         center_layout.addWidget(spacer1)
 
@@ -411,8 +440,8 @@ class FullscreenPlayer(QWidget):
         # Spacer
         spacer2 = QWidget()
         spacer2.setSizePolicy(
-            QWidget.SizePolicy.Policy.Expanding,
-            QWidget.SizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
         )
         center_layout.addWidget(spacer2)
 
@@ -470,15 +499,18 @@ class FullscreenPlayer(QWidget):
         self.lyrics_label.setText("No lyrics available")
 
     def setup_connections(self):
-        """Connect signals and slots"""
+        """Connect signals and slots with error checking"""
         self.close_button.clicked.connect(self.close_fullscreen)
         self.play_pause_button.clicked.connect(self.toggle_play_pause)
         self.previous_button.clicked.connect(self.previous_track)
         self.next_button.clicked.connect(self.next_track)
 
-        # Player connections
-        self.player.positionChanged.connect(self.update_position)
-        self.player.stateChanged.connect(self.update_play_state)
+        # Player connections with safety checks
+        if hasattr(self.player, 'positionChanged'):
+            self.player.positionChanged.connect(self.update_position)
+
+        if hasattr(self.player, 'stateChanged'):
+            self.player.stateChanged.connect(self.update_play_state)
 
         # Timer for smooth progress updates
         self.progress_timer = QTimer(self)
@@ -487,50 +519,73 @@ class FullscreenPlayer(QWidget):
         self.progress_timer.start()
 
     def update_track(self, file_path, metadata=None, pixmap=None):
-        """Update the display with new track information"""
-        self.current_track_path = file_path
+        """Update the display with new track information with error handling"""
+        try:
+            self.current_track_path = file_path
 
-        if not metadata:
-            metadata = self.metadata_handler.extract_metadata(file_path)
+            if not metadata and file_path:
+                metadata = self.metadata_handler.extract_metadata(file_path)
 
-        self.current_metadata = metadata
+            if not metadata:
+                metadata = {
+                    'title': 'Unknown Title',
+                    'artist': 'Unknown Artist',
+                    'album': 'Unknown Album',
+                    'year': ''
+                }
 
-        # Update track info
-        self.title_label.setText(metadata['title'])
-        self.artist_label.setText(metadata['artist'])
-        self.album_label.setText(f"{metadata['album']} • {metadata.get('year', '')}")
+            self.current_metadata = metadata
 
-        # Set album art
-        if not pixmap:
-            pixmap = self.metadata_handler.extract_album_art(file_path)
+            # Update track info
+            self.title_label.setText(metadata.get('title', 'Unknown Title'))
+            self.artist_label.setText(metadata.get('artist', 'Unknown Artist'))
+            album_year = f"{metadata.get('album', 'Unknown Album')}"
+            if metadata.get('year'):
+                album_year += f" • {metadata.get('year')}"
+            self.album_label.setText(album_year)
 
-        if pixmap and not pixmap.isNull():
-            self.current_album_art = pixmap
+            # Set album art
+            if not pixmap and file_path:
+                pixmap = self.metadata_handler.extract_album_art(file_path)
 
-            # Scale pixmap to fit the label
-            scaled_pixmap = pixmap.scaled(
-                400, 400,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.album_art_label.setPixmap(scaled_pixmap)
+            if pixmap and not pixmap.isNull():
+                self.current_album_art = pixmap
 
-            # Extract colors for gradient background
-            self.background_colors = self.color_extractor.extract_colors(pixmap)
-            self.update_background()
-        else:
-            self.current_album_art = None
-            self.album_art_label.clear()
-            self.album_art_label.setText("No Album Art")
-            self.background_colors = [QColor("#191414"), QColor("#121212")]
-            self.update_background()
+                # Scale pixmap to fit the label
+                scaled_pixmap = pixmap.scaled(
+                    400, 400,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                self.album_art_label.setPixmap(scaled_pixmap)
 
-        # Update times
-        length = metadata.get('length', 0)
-        self.total_time.setText(self.format_time(int(length * 1000)))
+                # Extract colors for gradient background
+                self.background_colors = self.color_extractor.extract_colors(pixmap)
+                self.update_background()
+            else:
+                self.current_album_art = None
+                self.album_art_label.clear()
+                self.album_art_label.setText("No Album Art")
+                self.background_colors = [QColor("#191414"), QColor("#121212")]
+                self.update_background()
 
-        # Get and set lyrics
-        self.update_lyrics(metadata['artist'], metadata['title'], metadata.get('album', ''))
+            # Update times
+            length = metadata.get('length', 0)
+            self.total_time.setText(self.format_time(int(length * 1000)))
+
+            # Get and set lyrics with proper error handling
+            artist = metadata.get('artist', '')
+            title = metadata.get('title', '')
+            album = metadata.get('album', '')
+            if artist and title:
+                self.update_lyrics(artist, title, album)
+            else:
+                self.lyrics_label.setText("No lyrics available")
+
+        except Exception as e:
+            print(f"Error in update_track: {e}")
+            self.title_label.setText("Error loading track")
+            self.lyrics_label.setText(f"An error occurred while loading track information.")
 
     def update_lyrics(self, artist, title, album=None):
         """Update the lyrics display"""
@@ -539,48 +594,62 @@ class FullscreenPlayer(QWidget):
 
         # Function to set lyrics after retrieval
         def set_lyrics():
-            lyrics = self.lyrics_provider.get_lyrics(artist, title, album)
+            try:
+                lyrics = self.lyrics_provider.get_lyrics(artist, title, album)
 
-            # Format lyrics for display
-            if lyrics:
-                # Replace line breaks with HTML breaks for proper rendering
-                formatted_lyrics = lyrics.replace('\n', '<br>')
-                self.lyrics_label.setText(f"<div style='line-height: 150%;'>{formatted_lyrics}</div>")
-            else:
-                self.lyrics_label.setText("No lyrics found for this song.")
+                # Format lyrics for display
+                if lyrics:
+                    # Replace line breaks with HTML breaks for proper rendering
+                    formatted_lyrics = lyrics.replace('\n', '<br>')
+                    self.lyrics_label.setText(f"<div style='line-height: 150%;'>{formatted_lyrics}</div>")
+                else:
+                    self.lyrics_label.setText("No lyrics found for this song.")
+            except Exception as e:
+                print(f"Error setting lyrics: {e}")
+                self.lyrics_label.setText("Error loading lyrics.")
 
         # Use QTimer to prevent UI blocking
         QTimer.singleShot(100, set_lyrics)
 
     def update_position(self, current_ms, total_ms):
         """Update time display"""
-        if total_ms > 0:
-            self.current_time.setText(self.format_time(current_ms))
-            self.total_time.setText(self.format_time(total_ms))
+        try:
+            if total_ms > 0:
+                self.current_time.setText(self.format_time(current_ms))
+                self.total_time.setText(self.format_time(total_ms))
+        except Exception as e:
+            print(f"Error updating position: {e}")
 
     def update_progress_bar(self):
-        """Update progress bar width based on playback position"""
-        if not self.player.is_playing():
-            return
-
+        """Update progress bar width based on playback position with error handling"""
         try:
+            if not self.player or not self.player.is_playing():
+                return
+
+            if not hasattr(self.player, 'media_player') or not self.player.media_player:
+                return
+
             current = self.player.media_player.get_time()
             total = self.player.media_player.get_length()
 
-            if total > 0:
-                progress = current / total
-                width = int(self.progress_bar.parent().width() * progress)
-                self.progress_bar.setFixedWidth(width)
-        except:
-            # Handle any VLC errors silently
-            pass
+            if total > 0 and current >= 0:
+                progress = min(1.0, current / total)  # Ensure progress doesn't exceed 1
+                parent_width = self.progress_bar.parent().width()
+                if parent_width > 0:
+                    width = int(parent_width * progress)
+                    self.progress_bar.setFixedWidth(width)
+        except Exception as e:
+            print(f"Error updating progress bar: {e}")
 
     def update_play_state(self, state):
         """Update play/pause button based on player state"""
-        if state == 'playing':
-            self.play_pause_button.setText("⏸")
-        else:
-            self.play_pause_button.setText("▶")
+        try:
+            if state == 'playing':
+                self.play_pause_button.setText("⏸")
+            else:
+                self.play_pause_button.setText("▶")
+        except Exception as e:
+            print(f"Error updating play state: {e}")
 
     def update_background(self):
         """Update background gradient based on album colors"""
@@ -588,61 +657,91 @@ class FullscreenPlayer(QWidget):
 
     def paintEvent(self, event):
         """Paint custom background gradient"""
-        painter = QPainter(self)
+        try:
+            painter = QPainter(self)
 
-        # Create gradient from extracted colors
-        gradient = QLinearGradient(0, 0, self.width(), self.height())
-        gradient.setColorAt(0, self.background_colors[0])
-        gradient.setColorAt(1, self.background_colors[1])
+            # Create gradient from extracted colors
+            gradient = QLinearGradient(0, 0, self.width(), self.height())
+            gradient.setColorAt(0, self.background_colors[0])
+            gradient.setColorAt(1, self.background_colors[1])
 
-        # Apply semi-transparent overlay for better readability
-        painter.fillRect(0, 0, self.width(), self.height(), gradient)
+            # Apply semi-transparent overlay for better readability
+            painter.fillRect(0, 0, self.width(), self.height(), gradient)
 
-        # Add overlay gradient for text readability
-        overlay = QLinearGradient(0, 0, 0, self.height())
-        overlay.setColorAt(0, QColor(0, 0, 0, 80))
-        overlay.setColorAt(1, QColor(0, 0, 0, 160))
-        painter.fillRect(0, 0, self.width(), self.height(), overlay)
+            # Add overlay gradient for text readability
+            overlay = QLinearGradient(0, 0, 0, self.height())
+            overlay.setColorAt(0, QColor(0, 0, 0, 80))
+            overlay.setColorAt(1, QColor(0, 0, 0, 160))
+            painter.fillRect(0, 0, self.width(), self.height(), overlay)
+        except Exception as e:
+            print(f"Error in paintEvent: {e}")
+            # Fill with default color in case of error
+            painter.fillRect(0, 0, self.width(), self.height(), QColor("#191414"))
 
     def toggle_play_pause(self):
-        """Toggle between play and pause"""
-        if self.player.is_playing():
-            self.player.pause()
-        else:
-            self.player.play()
+        """Toggle between play and pause with error checking"""
+        try:
+            if self.player:
+                if self.player.is_playing():
+                    self.player.pause()
+                else:
+                    self.player.play()
+        except Exception as e:
+            print(f"Error in toggle_play_pause: {e}")
 
     def previous_track(self):
-        """Signal to play previous track"""
-        self.player.previousRequested.emit()
+        """Signal to play previous track with error checking"""
+        try:
+            if hasattr(self.player, 'previousRequested'):
+                self.player.previousRequested.emit()
+        except Exception as e:
+            print(f"Error in previous_track: {e}")
 
     def next_track(self):
-        """Signal to play next track"""
-        self.player.nextRequested.emit()
+        """Signal to play next track with error checking"""
+        try:
+            if hasattr(self.player, 'nextRequested'):
+                self.player.nextRequested.emit()
+        except Exception as e:
+            print(f"Error in next_track: {e}")
 
     def close_fullscreen(self):
         """Exit full-screen mode"""
-        self.closeRequested.emit()
-        self.close()
+        try:
+            self.closeRequested.emit()
+            self.close()
+        except Exception as e:
+            print(f"Error closing fullscreen: {e}")
+            # Force close if signal fails
+            self.close()
 
     def format_time(self, ms):
         """Format milliseconds to mm:ss"""
-        if ms <= 0:
-            return "0:00"
+        try:
+            if ms <= 0:
+                return "0:00"
 
-        seconds = ms // 1000
-        minutes = seconds // 60
-        seconds %= 60
-        return f"{minutes}:{seconds:02d}"
+            seconds = ms // 1000
+            minutes = seconds // 60
+            seconds %= 60
+            return f"{minutes}:{seconds:02d}"
+        except Exception as e:
+            print(f"Error formatting time: {e}")
+            return "0:00"
 
     def keyPressEvent(self, event):
         """Handle key press events"""
-        if event.key() == Qt.Key.Key_Escape:
-            self.close_fullscreen()
-        elif event.key() == Qt.Key.Key_Space:
-            self.toggle_play_pause()
-        elif event.key() == Qt.Key.Key_Left:
-            self.previous_track()
-        elif event.key() == Qt.Key.Key_Right:
-            self.next_track()
-        else:
+        try:
+            if event.key() == Qt.Key.Key_Escape:
+                self.close_fullscreen()
+            elif event.key() == Qt.Key.Key_Space:
+                self.toggle_play_pause()
+            elif event.key() == Qt.Key.Key_Left:
+                self.previous_track()
+            elif event.key() == Qt.Key.Key_Right:
+                self.next_track()
+            else:
+                super().keyPressEvent(event)
+        except Exception as e:
+            print(f"Error in keyPressEvent: {e}")
             super().keyPressEvent(event)

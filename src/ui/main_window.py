@@ -190,32 +190,52 @@ class MainWindow(QMainWindow):
         self.player_controls.fullscreenRequested.connect(self.show_fullscreen_player)
 
     def show_fullscreen_player(self):
-        """Show the fullscreen player"""
-        # Get current track info
-        track_info = self.player_controls.get_current_track_info()
+        """Show the fullscreen player with proper error handling"""
+        try:
+            # Get current track info
+            if not hasattr(self.player_controls, 'get_current_track_info'):
+                # Fallback if method not available
+                track_info = {
+                    'path': getattr(self.player_controls, 'current_track_path', None),
+                    'metadata': getattr(self.player_controls, 'current_metadata', None),
+                    'album_art': getattr(self.player_controls, 'current_album_art', None)
+                }
+            else:
+                track_info = self.player_controls.get_current_track_info()
 
-        # Create fullscreen player if not exists or was closed
-        if not self.fullscreen_player or not self.fullscreen_player.isVisible():
-            self.fullscreen_player = FullscreenPlayer(self.player, self.metadata_handler)
-            self.fullscreen_player.closeRequested.connect(self.on_fullscreen_closed)
+            # Create fullscreen player if not exists or was closed
+            if not self.fullscreen_player or not self.fullscreen_player.isVisible():
+                from src.ui.fullscreen_player import FullscreenPlayer
+                self.fullscreen_player = FullscreenPlayer(self.player, self.metadata_handler)
+                self.fullscreen_player.closeRequested.connect(self.on_fullscreen_closed)
 
-        # Update with current track
-        if track_info['path'] and track_info['metadata']:
-            self.fullscreen_player.update_track(
-                track_info['path'],
-                track_info['metadata'],
-                track_info['album_art']
+            # Update with current track if available
+            if track_info.get('path') and track_info.get('metadata'):
+                self.fullscreen_player.update_track(
+                    track_info['path'],
+                    track_info['metadata'],
+                    track_info.get('album_art')
+                )
+
+            # Show fullscreen after everything is set up
+            self.fullscreen_player.showFullScreen()
+
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            print(f"Error showing fullscreen player: {e}")
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Could not open fullscreen mode: {str(e)}"
             )
-
-        # Show fullscreen
-        self.fullscreen_player.showFullScreen()
 
     def on_fullscreen_closed(self):
         """Handle fullscreen player close"""
-        # Update main UI if needed
-        pass
-
-
+        try:
+            # Update main UI if needed
+            pass
+        except Exception as e:
+            print(f"Error in on_fullscreen_closed: {e}")
     def _on_player_state_changed(self, state):
         """Handle player state changes"""
         if state == 'playing':
